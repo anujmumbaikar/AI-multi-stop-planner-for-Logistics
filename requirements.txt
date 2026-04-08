@@ -1,0 +1,20 @@
+# Core AI / LangGraph
+langgraph>=0.2.0
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
+
+# Google APIs
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.130.0
+gspread>=6.1.0
+
+# HTTP
+requests>=2.31.0
+
+# Utilities
+pydantic>=2.7.0
+python-dotenv>=1.0.0
