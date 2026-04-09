@@ -3,13 +3,14 @@ tools/ors_tools.py
 OpenRouteService tools — geocoding (Pelias) + VROOM route optimization.
 
 n8n equivalents:
-  geocode_address()   →  GPS Pickup / GPS Delivery nodes
-  format_ors_jobs()   →  Format Jobs node
-  optimize_route()    →  Request Open Route API → Extract Job → Merge Sequence
+  geocode_address()              →  GPS Pickup / GPS Delivery nodes
+  optimize_route()               →  Request Open Route API → Extract Job → Merge Sequence
+  optimize_route_with_retry()    →  Retry wrapper — 3 attempts, exponential backoff (spec §5.3)
 """
 
 from __future__ import annotations
 import os
+import time
 import logging
 from typing import List
 
@@ -199,3 +200,42 @@ def optimize_route(stops: List[dict]) -> dict:
         "total_distance_meters": summary["distance"],
         "ordered_stops": ordered_stops,
     }
+
+
+def optimize_route_with_retry(stops: List[dict], max_retries: int = 3) -> dict:
+    """
+    Calls optimize_route with exponential backoff on failure (spec §5.3).
+
+    Retry schedule: 1s → 3s → 9s. After max_retries exhausted, raises
+    RuntimeError("ORS_OPTIMIZATION_FAILED").
+
+    Args:
+        stops:       List of stop dicts (must have stop_index, store_name,
+                     address, latitude, longitude).
+        max_retries: Maximum number of attempts (default 3).
+
+    Returns:
+        RouteResult dict from optimize_route on success.
+
+    Raises:
+        RuntimeError: After all retries are exhausted.
+    """
+    delays = [1, 3, 9]
+    last_exc: Exception = RuntimeError("No attempts made")
+
+    for attempt, delay in enumerate(delays[:max_retries], 1):
+        try:
+            return optimize_route.invoke({"stops": stops})
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "ORS optimization attempt %d/%d failed: %s.%s",
+                attempt, max_retries, exc,
+                f" Retrying in {delay}s..." if attempt < max_retries else " No more retries.",
+            )
+            if attempt < max_retries:
+                time.sleep(delay)
+
+    raise RuntimeError(
+        f"ORS_OPTIMIZATION_FAILED after {max_retries} attempts: {last_exc}"
+    )

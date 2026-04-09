@@ -172,6 +172,8 @@ poetry.toml
 credentials/
 AI_GENERATED_CODE/
 ors-docker/
+.claude/
+CLAUDE.md
 # LSP config files
 pyrightconfig.json
 
