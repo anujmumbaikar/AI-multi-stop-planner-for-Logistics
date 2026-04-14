@@ -1,33 +1,45 @@
 # Logistics Planner
 
-AI-powered logistics route optimizer that turns inbound Gmail requests into a routed pickup schedule, stores an audit trail in Google Sheets, and sends a confirmation reply back to the sender.
+AI-powered logistics route optimizer that turns inbound Gmail requests into optimized pickup/delivery schedules, stores an audit trail in Google Sheets, and sends HTML confirmation replies back to the sender.
 
 ## What It Does
 
-The project ingests unread Gmail messages, extracts structured pickup data with GPT-4o, geocodes pickup and delivery locations with OpenRouteService, optimizes the pickup order for a truck route, compares original vs. optimized distance/time using ORS matrix calls, writes the results to Google Sheets, and sends an HTML reply to the original email thread.
+The system ingests unread Gmail messages, extracts structured pickup/delivery data with GPT-4o, geocodes addresses using OpenRouteService (Pelias), optimizes routes using ORS VROOM with pickup-delivery pairing, compares original vs. optimized distance/time using ORS matrix API calls, logs results to Google Sheets, and sends threaded HTML reply emails with route summaries and savings comparisons.
 
 ## Workflow
 
-The main workflow lives in [agent.ipynb](agent.ipynb). It is built as a LangGraph pipeline with these steps:
+The main workflow lives in [agent.ipynb](agent.ipynb). It is built as a LangGraph pipeline with these nodes:
 
-1. `gmail_trigger` - create a `REQ-YYYYMMDD-<6-char hash>` request id and check for duplicates.
-2. `parser_agent` - use GPT-4o to extract sender info and pickup stops from the email body.
-3. `save_email_logs_to_sheet` - save the raw email and parsed stops to Google Sheets.
-4. `geocode_pickup_delivery_address` - geocode both pickup and delivery addresses and save the geocoded rows.
-5. `route_optimization` - calculate original distance/time, run ORS VROOM optimization, then calculate optimized distance/time.
-6. `ai_agent_reply` - generate the final HTML confirmation email with route table and savings summary.
-7. `send_reply_to_gmail` - send the reply in the original Gmail thread.
-8. `error_handler` - log failures to the error sheet.
+1. `gmail_trigger` - Create a `REQ-YYYYMMDD-<6-char hash>` request ID and check for duplicates.
+2. `parser_agent` - Use GPT-4o to extract sender info, company name, and pickup/delivery stops from the email body.
+3. `save_email_logs_to_sheet` - Save the raw email and parsed stops to Google Sheets `email_log` and `parsed_stops` tabs.
+4. `geocode_pickup_delivery_address` - Geocode both pickup and delivery addresses with elevation lookup; save to `geocoded` tab.
+5. `route_optimization` - Calculate unoptimized baseline via ORS `/matrix`, run ORS VROOM `/optimization` with shipments mode, calculate optimized metrics via `/matrix`.
+6. `matrix_unoptimized` - Compute baseline distance/duration for original email stop order using ORS matrix API.
+7. `ai_agent_reply` - Generate HTML confirmation email with route tables, vehicle breakdowns, and before/after savings comparison.
+8. `send_reply_to_gmail` - Send the HTML reply in the original Gmail thread.
+9. `error_handler` - Log failures to the `error_log` sheet.
 
 ### Route Optimization Deep Dive
 
-The route optimization node now follows a three-step pattern:
+The route optimization follows a three-step pattern:
 
-- Measure the original email order with ORS `/matrix`.
-- Optimize pickup order with ORS VROOM `/optimization`.
-- Measure the optimized order again with ORS `/matrix`.
+1. **Baseline measurement** - ORS `/v2/matrix/driving-hgv` computes distance/duration for the original email stop order.
+2. **VROOM optimization** - ORS `/optimization` with shipments mode enforces pickup-before-delivery constraints, time windows, and vehicle capacities.
+3. **Optimized measurement** - ORS `/matrix` computes distance/duration for the VROOM-ordered sequence.
 
-This means the README and the notebook both reflect the same design: real baseline distance/time, real optimized distance/time, and computed savings.
+Both matrix calls use the `driving-hgv` profile for truck routing. The savings comparison (original vs. optimized km and minutes) is included in the confirmation email.
+
+### State Management
+
+The LangGraph state (`LogisticsState`) tracks:
+
+- **Email context**: raw content, sender email, thread ID, request ID
+- **Parsed data**: stops list, sender company, rejected stops
+- **Geocoding**: latitude/longitude for pickup and delivery addresses
+- **Optimization**: vehicle count, VROOM summary, routes, ordered stops
+- **Matrix results**: unoptimized and optimized distance/duration legs
+- **Output**: reply HTML, email log saved flag, error messages
 
 ## Workflow in Action
 
@@ -65,11 +77,11 @@ The sheet captures:
 
 ## Repository Layout
 
-- [agent.ipynb](agent.ipynb) - notebook that contains the full LangGraph pipeline and runtime entry point.
-- [tools/gmail_tools.py](tools/gmail_tools.py) - Gmail polling and threaded reply helpers.
-- [tools/sheets_tools.py](tools/sheets_tools.py) - Google Sheets logging helpers and duplicate detection.
-- [tools/ors_tools.py](tools/ors_tools.py) - ORS geocoding, elevation, optimization, and distance matrix helpers.
-- [auth_setup.py](auth_setup.py) - one-time Google OAuth setup that creates `credentials/token.json`.
+- [agent.ipynb](agent.ipynb) - Jupyter notebook containing the full LangGraph pipeline, state definition, and runtime entry point.
+- [tools/gmail_tools.py](tools/gmail_tools.py) - Gmail API wrappers: `poll_gmail_inbox()` and `send_gmail_reply()` as LangChain tools.
+- [tools/sheets_tools.py](tools/sheets_tools.py) - Google Sheets logging: email logs, parsed stops, geocoded data, route output, error logs, and duplicate detection.
+- [tools/ors_tools.py](tools/ors_tools.py) - OpenRouteService tools: `geocode_address()`, `elevation_point()`, `optimize_route()`, and `distance_matrix()`.
+- [auth_setup.py](auth_setup.py) - One-time Google OAuth setup that creates `credentials/token.json`.
 - [requirements.txt](requirements.txt) - Python dependencies.
 
 ## Requirements
@@ -91,14 +103,18 @@ The sheet captures:
 
 ## Environment Variables
 
-The notebook and helper modules read these variables:
+The notebook and helper modules read these variables from `.env`:
 
-- `OPENAI_API_KEY` - OpenAI API key used by GPT-4o.
-- `ORS_API_KEY` - OpenRouteService API key.
-- `GMAIL_POLL_INTERVAL` - polling interval in seconds, default `60`.
-- `GMAIL_QUERY` - Gmail search query, default `is:unread subject:Pickup Schedule`.
-- `GOOGLE_TOKEN_PATH` - OAuth token path, default `credentials/token.json`.
-- `GOOGLE_SHEET_ID` - Google Sheet id used for logs and route output.
+- `OPENAI_API_KEY` - OpenAI API key for GPT-4o parser and reply generation.
+- `ORS_API_KEY` - OpenRouteService API key for geocoding, elevation, matrix, and VROOM optimization.
+- `GMAIL_POLL_INTERVAL` - Gmail polling interval in seconds (default: `60`).
+- `GMAIL_QUERY` - Gmail search query (default: `is:unread subject:Pickup Schedule`).
+- `GOOGLE_TOKEN_PATH` - OAuth token path (default: `credentials/token.json`).
+- `GOOGLE_SHEET_ID` - Google Sheet ID for logs and route output.
+- `DEPOT_LATITUDE` - Depot/warehouse starting latitude for route optimization.
+- `DEPOT_LONGITUDE` - Depot/warehouse starting longitude for route optimization.
+- `MAX_VEHICLES` - Maximum fleet size for VROOM optimization (default: `5`).
+- `VEHICLE_CAPACITY` - Capacity units per vehicle (default: `100`).
 
 ## Google Sheets Tabs
 
@@ -147,3 +163,4 @@ Work in progress:
 1. Support Gmail attachments such as `.csv` and `.xlsx` files.
 2. For now, this is implemented in the notebook file; later it will be moved into a proper folder-based structure.
 3. More routes optimization by priority , elevation .
+4. No. of vehicals based optimization

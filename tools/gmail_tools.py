@@ -25,7 +25,7 @@ from langchain_core.tools import tool
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.modify",  # needed to mark read
+    "https://www.googleapis.com/auth/gmail.modify",
 ]
 
 TOKEN_PATH = os.getenv("GOOGLE_TOKEN_PATH", "credentials/token.json")

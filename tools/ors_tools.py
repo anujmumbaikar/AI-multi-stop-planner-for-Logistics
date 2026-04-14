@@ -24,8 +24,6 @@ ORS_BASE = "https://api.openrouteservice.org"
 ORS_KEY  = os.getenv("ORS_API_KEY", "")
 
 
-# ── Shared helpers ────────────────────────────────────────────────────────────
-
 def _ors_headers() -> dict:
     return {
         "Authorization": ORS_KEY,
@@ -50,7 +48,6 @@ def _time_str_to_seconds(time_str: str) -> Optional[int]:
         return None
 
 
-# ── Geocoding ─────────────────────────────────────────────────────────────────
 
 @tool
 def geocode_address(address: str) -> dict:
@@ -65,7 +62,14 @@ def geocode_address(address: str) -> dict:
     """
     resp = requests.get(
         f"{ORS_BASE}/geocode/search",
-        params={"api_key": ORS_KEY, "text": address, "size": 1},
+        params={
+            "api_key":          ORS_KEY,
+            "text":             address,
+            "size":             1,
+            "boundary.country": "IND",    # restrict results to India
+            "focus.point.lat":  19.0,     # bias toward Mumbai/Maharashtra region
+            "focus.point.lon":  73.0,
+        },
         timeout=10,
     )
     resp.raise_for_status()
@@ -79,10 +83,22 @@ def geocode_address(address: str) -> dict:
     label      = feat["properties"].get("label", address)
     confidence = feat["properties"].get("confidence", 0.0)
 
+    # Reject coordinates that fall outside India's bounding box
+    INDIA = {"lat_min": 6.0, "lat_max": 37.0, "lon_min": 67.0, "lon_max": 98.0}
+    if not (INDIA["lat_min"] <= lat <= INDIA["lat_max"] and
+            INDIA["lon_min"] <= lon <= INDIA["lon_max"]):
+        raise ValueError(
+            f"Geocoded address outside India (lat={lat:.5f}, lon={lon:.5f}, "
+            f"confidence={confidence:.2f}) for input: '{address}'. "
+            f"Check address spelling or use a more specific address."
+        )
+
+    if confidence < 0.3:
+        log.warning("Low-confidence geocoding (%.2f) for '%s' → %s (%.5f, %.5f)",
+                    confidence, address, label, lat, lon)
+
+    log.info("Geocoded '%s' → (%.5f, %.5f) confidence=%.2f", address, lat, lon, confidence)
     return {"address": label, "latitude": lat, "longitude": lon, "confidence": confidence}
-
-
-# ── Elevation ─────────────────────────────────────────────────────────────────
 
 @tool
 def elevation_point(latitude: float, longitude: float) -> dict:
@@ -111,8 +127,6 @@ def elevation_point(latitude: float, longitude: float) -> dict:
         "longitude": longitude,
     }
 
-
-# ── Route Optimisation (VROOM) ────────────────────────────────────────────────
 
 @tool
 def optimize_route(
@@ -245,11 +259,14 @@ def optimize_route(
         raise ValueError("No stops provided to optimize_route")
 
     TOLERANCE_SEC = 3600   # ±60-minute time-window tolerance
+    vehicles = []
+    for i in range(max_vehicles):
+        
+        start_offset = i * 7200  # 2 hours per vehicle
+        vehicle_start = 28800 + start_offset  # 08:00 + offset
+        vehicle_end = 79200  # All vehicles end at 22:00
 
-    # ── Vehicle fleet ─────────────────────────────────────────────────────────
-    # Format matches: openrouterservice_examples/optimization/body_object.json
-    vehicles = [
-        {
+        vehicle = {
             "id":       i + 1,
             "profile":  "driving-hgv",            # HGV/truck profile
             "start":    [depot_lon, depot_lat],   # Depot start location
@@ -257,29 +274,25 @@ def optimize_route(
             "capacity": [vehicle_capacity],       # Capacity per dimension
             # Optional: skills can be added for constraint-based routing
             # "skills": [1, 14],                  # Skills this vehicle has
-            "time_window": [28800, 79200],        # Vehicle availability: 08:00–22:00
+            "time_window": [vehicle_start, vehicle_end],
+            "priority": 10 - i,
         }
-        for i in range(max_vehicles)
-    ]
+        vehicles.append(vehicle)
 
-    # ── Build payload ─────────────────────────────────────────────────────────
     if use_pd_pairs:
         # Use shipments mode: pickup ALWAYS precedes its delivery
-        # Format matches: openrouterservice_examples/optimization/body_object.json
         shipments = []
         for s in stops:
             idx         = s["stop_index"]
             pickup_id   = idx * 10 + 1
             delivery_id = idx * 10 + 2
 
-            # Build pickup leg (matches ORS VROOM shipment pickup format)
             pickup_leg = {
                 "id":          pickup_id,
                 "location":    [s["pickup_longitude"], s["pickup_latitude"]],
                 "service":     300,  # 5 minutes service time
                 "description": f"{s['store_name']} Pickup",
             }
-            # Add time window if specified (±1 hour tolerance)
             pu_str = s.get("expected_pickup_time")
             if pu_str:
                 pu_sec = _time_str_to_seconds(pu_str)
@@ -288,14 +301,13 @@ def optimize_route(
                         [max(0, pu_sec - TOLERANCE_SEC), pu_sec + TOLERANCE_SEC]
                     ]
 
-            # Build delivery leg (matches ORS VROOM shipment delivery format)
+            # Build delivery leg
             delivery_leg = {
                 "id":          delivery_id,
                 "location":    [s["delivery_longitude"], s["delivery_latitude"]],
                 "service":     300,  # 5 minutes service time
                 "description": f"{s['store_name']} Delivery",
             }
-            # Add time window if specified (±1 hour tolerance)
             dl_str = s.get("expected_delivery_time")
             if dl_str:
                 dl_sec = _time_str_to_seconds(dl_str)
@@ -304,17 +316,19 @@ def optimize_route(
                         [max(0, dl_sec - TOLERANCE_SEC), dl_sec + TOLERANCE_SEC]
                     ]
 
-            # Shipment format: { "pickup": {...}, "delivery": {...}, "amount": [1] }
-            shipments.append({
+            shipment = {
                 "pickup":   pickup_leg,
                 "delivery": delivery_leg,
                 "amount":   [1]  # 1 unit per shipment
-            })
+            }
+            # Priority based on time window presence — stops with time windows get higher priority
+            if pu_str or dl_str:
+                shipment["priority"] = 100  # High priority for time-sensitive stops
+            shipments.append(shipment)
 
         payload = {"shipments": shipments, "vehicles": vehicles}
 
     else:
-        # Plain jobs mode (pickup-only, no PD pairing)
         # Format matches: openrouterservice_examples/optimization/body_object.json
         jobs = []
         for s in stops:
@@ -333,12 +347,12 @@ def optimize_route(
                 pu_sec = _time_str_to_seconds(pu_str)
                 if pu_sec is not None:
                     job["time_windows"] = [[max(0, pu_sec - TOLERANCE_SEC), pu_sec + TOLERANCE_SEC]]
+                    job["priority"] = 100  # High priority for time-sensitive stops
 
             jobs.append(job)
 
         payload = {"jobs": jobs, "vehicles": vehicles}
 
-    # ── POST to /optimization ─────────────────────────────────────────────────
     resp = requests.post(
         f"{ORS_BASE}/optimization",
         headers=_ors_headers(),
@@ -353,8 +367,6 @@ def optimize_route(
     if not data.get("routes"):
         raise ValueError("ORS /optimization returned no routes — check vehicle/job config")
 
-    # ── Parse ordered_stops (flat list in optimised sequence) ─────────────────
-    # Build lookup: vroom job_id → (stop dict, stop_type)
     job_lookup: dict = {}
     for s in stops:
         idx = s["stop_index"]
@@ -398,10 +410,8 @@ def optimize_route(
 
     summary = data["summary"]
 
-    # Return summary with BOTH original ORS field names (for backward compatibility)
-    # AND detailed field names (for enhanced reporting)
+
     detailed_summary = {
-        # Original ORS field names (kept for agent.ipynb compatibility)
         "cost":         summary.get("cost", 0),
         "routes":       summary.get("routes", 0),
         "unassigned":   summary.get("unassigned", 0),
@@ -415,7 +425,7 @@ def optimize_route(
         "priority":     summary.get("priority", 0),
         "violations":   summary.get("violations", []),
         "computing_times": summary.get("computing_times", {}),
-        # Additional detailed field names (aliases for clarity)
+
         "routes_used":            summary.get("routes", 0),
         "unassigned_count":       summary.get("unassigned", 0),
         "total_delivery":         summary.get("delivery", [0]),
@@ -434,8 +444,6 @@ def optimize_route(
         "ordered_stops": ordered_stops,              # flat optimised stop list
     }
 
-
-# ── Distance Matrix ───────────────────────────────────────────────────────────
 
 @tool
 def distance_matrix(locations: List[dict], profile: str = "driving-car") -> dict:
