@@ -31,12 +31,12 @@ def _ors_headers() -> dict:
         "Accept":        "application/json, application/geo+json",
     }
 
-
+DEFAULT_WINDOW_HALF_SEC = 1800
 def _time_str_to_seconds(time_str: str) -> Optional[int]:
     """
     Convert 'HH:MM' string to seconds since midnight.
     Returns None if parsing fails.
-
+ 
     VROOM time windows are in seconds since midnight:
         '08:00' → 28800,  '10:15' → 36900,  '13:30' → 48600
     """
@@ -46,13 +46,26 @@ def _time_str_to_seconds(time_str: str) -> Optional[int]:
         return h * 3600 + m * 60
     except (ValueError, AttributeError, IndexError):
         return None
+ 
+ 
+def _time_window(time_str: Optional[str]) -> Optional[List[int]]:
+    """
+    Build a VROOM [[start, end]] time window from a single 'HH:MM' string.
+    Returns None if no time string is given — VROOM then has no time constraint.
+    """
+    if not time_str:
+        return None
+    sec = _time_str_to_seconds(time_str)
+    if sec is None:
+        return None
+    return [[max(0, sec - DEFAULT_WINDOW_HALF_SEC), sec + DEFAULT_WINDOW_HALF_SEC]]
 
 
 
 @tool
 def geocode_address(address: str) -> dict:
     """
-    Convert a human-readable address to GPS coordinates (ORS Pelias).
+    Convert a human-readable address to GPS coordinates.
 
     Endpoint: GET /geocode/search
     Args:
@@ -67,8 +80,6 @@ def geocode_address(address: str) -> dict:
             "text":             address,
             "size":             1,
             "boundary.country": "IND",    # restrict results to India
-            "focus.point.lat":  19.0,     # bias toward Mumbai/Maharashtra region
-            "focus.point.lon":  73.0,
         },
         timeout=10,
     )
@@ -100,6 +111,15 @@ def geocode_address(address: str) -> dict:
     log.info("Geocoded '%s' → (%.5f, %.5f) confidence=%.2f", address, lat, lon, confidence)
     return {"address": label, "latitude": lat, "longitude": lon, "confidence": confidence}
 
+# print(geocode_address("1600 Amphitheatre Parkway, Mountain View, CA"))
+# output:
+#  {                                                                                      
+#     "address": "1600 Amphitheatre Parkway, Mountain View, CA, USA",                      
+#     "latitude": 37.422288,                                                               
+#     "longitude": -122.085652,                                                            
+#     "confidence": 1                                                                      
+#   }
+
 @tool
 def elevation_point(latitude: float, longitude: float) -> dict:
     """
@@ -126,233 +146,145 @@ def elevation_point(latitude: float, longitude: float) -> dict:
         "latitude":  latitude,
         "longitude": longitude,
     }
-
+# print(elevation_point(37.422288, -122.085652))
+# output :{'elevation': 7, 'latitude': 37.422288, 'longitude': -122.085652}
 
 @tool
 def optimize_route(
     stops: List[dict],
     depot_lon: float,
     depot_lat: float,
-    max_vehicles: int   = 5,
+    max_vehicles: int = 5,
     vehicle_capacity: int = 100,
-    use_pd_pairs: bool  = True,
+    use_pd_pairs: bool = True,
+    vehicle_time_window: Optional[List[int]] = None,
 ) -> dict:
     """
     Send geocoded stops to ORS /optimization (VROOM).
-
-    Supports two modes:
+ 
+    What VROOM handles 
+      - Pickup-before-delivery ordering          → use shipments mode
+      - Capacity enforcement per vehicle         → capacity + amount fields
+      - Time-window feasibility                  → stops that can't be served go to unassigned[]
+      - violations[] on each step               → delay / lead_time / precedence causes
+      - Multi-vehicle dispatch optimisation      → pass max_vehicles, VROOM picks how many to use
+ 
+    Modes:
       use_pd_pairs=True  → VROOM `shipments` — pickup ALWAYS precedes its delivery.
-      use_pd_pairs=False → VROOM `jobs`       — pickup-only (no PD pairing).
-
-    Request body format (matching ORS VROOM API spec):
-      {
-        "jobs": [  # or "shipments" for PD pairs
-          {
-            "id": int,
-            "service": int,           # service time in seconds (default: 300)
-            "location": [lon, lat],
-            "skills": [int],          # optional skill requirements
-            "time_windows": [[start_s, end_s]]  # optional
-          }
-        ],
-        "vehicles": [
-          {
-            "id": int,
-            "profile": str,           # e.g., "driving-hgv"
-            "start": [lon, lat],
-            "end": [lon, lat],
-            "capacity": [int],        # array of capacity dimensions
-            "skills": [int],          # optional skill requirements
-            "time_window": [start_s, end_s]  # vehicle availability window
-          }
-        ]
-      }
-
-    Response format from ORS /optimization:
-      {
-        "code": 0,
-        "summary": {
-          "cost": int,                # total route cost
-          "routes": int,              # number of routes used
-          "unassigned": int,          # count of unassigned jobs
-          "delivery": [int],          # total delivery amounts per dimension
-          "amount": [int],            # total amount delivered
-          "pickup": [int],            # total pickup amounts per dimension
-          "setup": int,               # total setup time
-          "service": int,             # total service time
-          "duration": int,            # total duration including service/waiting
-          "waiting_time": int,        # total waiting time
-          "priority": int,            # priority score
-          "violations": [],           # constraint violations
-          "computing_times": {        # performance metrics
-            "loading": int,           # loading time in ms
-            "solving": int,           # solving time in ms
-            "routing": int            # routing time in ms
-          }
-        },
-        "unassigned": [
-          { "id": int, "location": [lon,lat], "type": "job|pickup|delivery" }
-        ],
-        "routes": [
-          {
-            "vehicle": int,
-            "cost": int,
-            "delivery": [int],
-            "amount": [int],
-            "pickup": [int],
-            "setup": int,
-            "service": int,
-            "duration": int,
-            "waiting_time": int,
-            "priority": int,
-            "steps": [
-              {
-                "type": "start|job|pickup|delivery|end",
-                "location": [lon, lat],
-                "setup": int,
-                "service": int,
-                "waiting_time": int,
-                "load": [int],          # remaining load after this step
-                "arrival": int,         # arrival time in seconds since midnight
-                "duration": int,        # cumulative duration to this point
-                "violations": [],
-                "id": int,              # job/pickup/delivery ID (if applicable)
-                "job": int              # alternative ID field
-              }
-            ],
-            "violations": []
-          }
-        ]
-      }
-
+      use_pd_pairs=False → VROOM `jobs`       — single-location delivery tasks only.
+ 
+    Each stop dict must contain:
+      stop_index, store_name, pickup_address,
+      pickup_latitude, pickup_longitude
+      (and for shipments: delivery_address, delivery_latitude, delivery_longitude)
+ 
+    Optional stop fields:
+      expected_pickup_time   ('HH:MM') → time window on the pickup leg
+      expected_delivery_time ('HH:MM') → time window on the delivery leg
+      priority               (int)     → passed through to VROOM; higher = preferred
+      temperature_control    (bool)    → preserved in ordered_stops for downstream use
+ 
     Args:
-        stops: List of geocoded stop dicts (stop_index, store_name, pickup/delivery lat/lon, etc.)
-        depot_lon / depot_lat: Depot start/end location.
-        max_vehicles: Fleet size ceiling (VROOM decides actual usage).
-        vehicle_capacity: Capacity per vehicle in units.
-        use_pd_pairs: Enforce pickup-before-delivery ordering via VROOM shipments.
-
+        stops:                Geocoded stop dicts.
+        depot_lon/depot_lat:  Depot coordinates (start + end for all vehicles).
+        max_vehicles:         Fleet ceiling — VROOM decides how many to actually use.
+        vehicle_capacity:     Capacity per vehicle (single dimension, in units).
+        use_pd_pairs:         True → shipments, False → delivery jobs.
+        vehicle_time_window:  [start_sec, end_sec] for all vehicles.
+                              Defaults to [28800, 79200] (08:00–22:00).
+ 
     Returns:
         {
-          "summary": {
-            # Full VROOM summary with all fields
-            "cost": int,
-            "routes_used": int,
-            "unassigned_count": int,
-            "total_delivery": [int],
-            "total_amount": [int],
-            "total_pickup": [int],
-            "setup_time_sec": int,
-            "service_time_sec": int,
-            "total_duration_sec": int,
-            "total_waiting_time_sec": int,
-            "priority": int,
-            "violations": [],
-            "computing_times": { "loading_ms": int, "solving_ms": int, "routing_ms": int }
-          },
-          "routes": list,       # Per-vehicle routes with full step details
-          "unassigned": list,   # Stops VROOM couldn't assign (with reasons if available)
-          "ordered_stops": list # Flat optimised stop list with sequence, ETA, vehicle assignment
+          "summary":          dict,   # VROOM summary as-is (cost, routes, unassigned, ...)
+          "routes":           list,   # per-vehicle routes with full step details
+          "unassigned_stops": list,   # stops VROOM couldn't assign (mapped back to stop info)
+          "ordered_stops":    list,   # flat optimised stop list with ETA + vehicle assignment
         }
     """
     if not stops:
         raise ValueError("No stops provided to optimize_route")
-
-    TOLERANCE_SEC = 3600   # ±60-minute time-window tolerance
-    vehicles = []
-    for i in range(max_vehicles):
-        
-        start_offset = i * 7200  # 2 hours per vehicle
-        vehicle_start = 28800 + start_offset  # 08:00 + offset
-        vehicle_end = 79200  # All vehicles end at 22:00
-
-        vehicle = {
-            "id":       i + 1,
-            "profile":  "driving-hgv",            # HGV/truck profile
-            "start":    [depot_lon, depot_lat],   # Depot start location
-            "end":      [depot_lon, depot_lat],   # Depot end location (circular route)
-            "capacity": [vehicle_capacity],       # Capacity per dimension
-            # Optional: skills can be added for constraint-based routing
-            # "skills": [1, 14],                  # Skills this vehicle has
-            "time_window": [vehicle_start, vehicle_end],
-            "priority": 10 - i,
+ 
+    tw = vehicle_time_window or [28800, 79200]  # default 08:00–22:00
+ 
+    vehicles = [
+        {
+            "id":          i + 1,
+            "profile":     "driving-hgv",
+            "start":       [depot_lon, depot_lat],
+            "end":         [depot_lon, depot_lat],
+            "capacity":    [vehicle_capacity],
+            "time_window": tw,
         }
-        vehicles.append(vehicle)
-
+        for i in range(max_vehicles)
+    ]
+ 
+    job_lookup: dict = {}
+ 
     if use_pd_pairs:
-        # Use shipments mode: pickup ALWAYS precedes its delivery
+        # Shipments mode: VROOM guarantees pickup precedes delivery
         shipments = []
         for s in stops:
             idx         = s["stop_index"]
-            pickup_id   = idx * 10 + 1
-            delivery_id = idx * 10 + 2
-
+            pickup_id   = idx * 2 + 1
+            delivery_id = idx * 2 + 2
+            job_lookup[pickup_id]   = (s, "pickup")
+            job_lookup[delivery_id] = (s, "delivery")
+ 
             pickup_leg = {
-                "id":          pickup_id,
-                "location":    [s["pickup_longitude"], s["pickup_latitude"]],
-                "service":     300,  # 5 minutes service time
-                "description": f"{s['store_name']} Pickup",
+                "id":       pickup_id,
+                "location": [s["pickup_longitude"], s["pickup_latitude"]],
+                "service":  300,  # 5 min service time
             }
-            pu_str = s.get("expected_pickup_time")
-            if pu_str:
-                pu_sec = _time_str_to_seconds(pu_str)
-                if pu_sec is not None:
-                    pickup_leg["time_windows"] = [
-                        [max(0, pu_sec - TOLERANCE_SEC), pu_sec + TOLERANCE_SEC]
-                    ]
-
-            # Build delivery leg
+            pu_tw = _time_window(s.get("expected_pickup_time"))
+            if pu_tw:
+                pickup_leg["time_windows"] = pu_tw
+ 
             delivery_leg = {
-                "id":          delivery_id,
-                "location":    [s["delivery_longitude"], s["delivery_latitude"]],
-                "service":     300,  # 5 minutes service time
-                "description": f"{s['store_name']} Delivery",
+                "id":       delivery_id,
+                "location": [s["delivery_longitude"], s["delivery_latitude"]],
+                "service":  300,
             }
-            dl_str = s.get("expected_delivery_time")
-            if dl_str:
-                dl_sec = _time_str_to_seconds(dl_str)
-                if dl_sec is not None:
-                    delivery_leg["time_windows"] = [
-                        [max(0, dl_sec - TOLERANCE_SEC), dl_sec + TOLERANCE_SEC]
-                    ]
-
-            shipment = {
+            dl_tw = _time_window(s.get("expected_delivery_time"))
+            if dl_tw:
+                delivery_leg["time_windows"] = dl_tw
+ 
+            shipment: dict = {
                 "pickup":   pickup_leg,
                 "delivery": delivery_leg,
-                "amount":   [1]  # 1 unit per shipment
+                "amount":   [1],  # 1 unit per shipment; VROOM tracks load automatically
             }
-            # Priority based on time window presence — stops with time windows get higher priority
-            if pu_str or dl_str:
-                shipment["priority"] = 100  # High priority for time-sensitive stops
+            if s.get("priority"):
+                shipment["priority"] = int(s["priority"])
+ 
             shipments.append(shipment)
-
+ 
         payload = {"shipments": shipments, "vehicles": vehicles}
-
+ 
     else:
-        # Format matches: openrouterservice_examples/optimization/body_object.json
+        # ── Jobs mode: simple single-location delivery tasks ──────────────────
         jobs = []
         for s in stops:
-            idx = s["stop_index"]
-            job = {
-                "id":       idx * 10 + 1,
-                "service":  300,  # 5 minutes service time
-                "delivery": [1],  # Delivery amount (ORS VROOM format)
+            idx    = s["stop_index"]
+            job_id = idx * 2 + 1
+            job_lookup[job_id] = (s, "job")
+ 
+            job: dict = {
+                "id":       job_id,
+                "service":  300,
+                "delivery": [1],  # reduces vehicle load by 1 (pre-loaded at depot)
                 "location": [s["pickup_longitude"], s["pickup_latitude"]],
-                # Optional: skills can be added for constraint-based routing
-                # "skills": [1],
             }
-            # Add time window if specified
-            pu_str = s.get("expected_pickup_time")
-            if pu_str:
-                pu_sec = _time_str_to_seconds(pu_str)
-                if pu_sec is not None:
-                    job["time_windows"] = [[max(0, pu_sec - TOLERANCE_SEC), pu_sec + TOLERANCE_SEC]]
-                    job["priority"] = 100  # High priority for time-sensitive stops
-
+            pu_tw = _time_window(s.get("expected_pickup_time"))
+            if pu_tw:
+                job["time_windows"] = pu_tw
+ 
+            if s.get("priority"):
+                job["priority"] = int(s["priority"])
+ 
             jobs.append(job)
-
+ 
         payload = {"jobs": jobs, "vehicles": vehicles}
-
+ 
     resp = requests.post(
         f"{ORS_BASE}/optimization",
         headers=_ors_headers(),
@@ -361,33 +293,24 @@ def optimize_route(
     )
     resp.raise_for_status()
     data = resp.json()
-
+ 
     if "error" in data:
         raise ValueError(f"ORS /optimization error: {data['error']}")
-    if not data.get("routes"):
-        raise ValueError("ORS /optimization returned no routes — check vehicle/job config")
-
-    job_lookup: dict = {}
-    for s in stops:
-        idx = s["stop_index"]
-        job_lookup[idx * 10 + 1] = (s, "pickup")
-        job_lookup[idx * 10 + 2] = (s, "delivery")
+ 
 
     ordered_stops: list = []
     seq = 1
-    for route in data["routes"]:
+    for route in data.get("routes", []):
         for step in route["steps"]:
             if step["type"] not in ("pickup", "delivery", "job"):
                 continue
-
             job_id = int(step.get("id", step.get("job", 0)))
             entry  = job_lookup.get(job_id)
             if not entry:
                 log.warning("Job %s not found in job_lookup", job_id)
                 continue
-
             s, stop_type = entry
-            is_delivery   = stop_type == "delivery"
+            is_delivery  = stop_type == "delivery"
             ordered_stops.append({
                 "job_id":                   job_id,
                 "store_id":                 s.get("store_id", ""),
@@ -402,77 +325,73 @@ def optimize_route(
                 "arrival_time_seconds":     step.get("arrival", 0),
                 "service_duration_seconds": step.get("service", 300),
                 "waiting_time_seconds":     step.get("waiting_time", 0),
+                "violations":               step.get("violations", []),
                 "temperature_control":      s.get("temperature_control", False),
                 "original_sequence":        s.get("original_sequence", s["stop_index"]),
                 "optimized_sequence":       seq,
             })
             seq += 1
+ 
+    # ── Map unassigned VROOM items back to stop info
+    # VROOM's unassigned[] gives {id, location, type} — no reason field.
+    # Violation causes (delay / lead_time / capacity) live in route step violations[],
+    unassigned_stops: list = []
+    seen_indices: set = set()
 
-    summary = data["summary"]
+    # rejection reason
+    rejection_reasons: dict[int, str] = {}
+    for route in data.get("routes", []):
+        for step in route.get("steps", []):
+            for v in step.get("violations", []):
+                job_id = int(v.get("id", 0))
+                if job_id:
+                    violation_type = v.get("violation", "unknown")
+                    rejection_reasons[job_id] = violation_type
 
+    for item in data.get("unassigned", []):
+        job_id = int(item.get("id", 0))
+        entry  = job_lookup.get(job_id)
+        if not entry:
+            continue
+        s, stop_type = entry
+        idx = s["stop_index"]
+        if idx in seen_indices:
+            continue  # deduplicate: one entry per shipment (pickup+delivery pair)
+        seen_indices.add(idx)
 
-    detailed_summary = {
-        "cost":         summary.get("cost", 0),
-        "routes":       summary.get("routes", 0),
-        "unassigned":   summary.get("unassigned", 0),
-        "delivery":     summary.get("delivery", [0]),
-        "amount":       summary.get("amount", [0]),
-        "pickup":       summary.get("pickup", [0]),
-        "setup":        summary.get("setup", 0),
-        "service":      summary.get("service", 0),
-        "duration":     summary.get("duration", 0),
-        "waiting_time": summary.get("waiting_time", 0),
-        "priority":     summary.get("priority", 0),
-        "violations":   summary.get("violations", []),
-        "computing_times": summary.get("computing_times", {}),
+        # Get reason from violations map, or infer from item type
+        reason = rejection_reasons.get(job_id)
+        if not reason:
+            reason = "CAPACITY_EXCEEDED" if item.get("type") == "delivery" else "TIME_WINDOW_CONFLICT"
 
-        "routes_used":            summary.get("routes", 0),
-        "unassigned_count":       summary.get("unassigned", 0),
-        "total_delivery":         summary.get("delivery", [0]),
-        "total_amount":           summary.get("amount", [0]),
-        "total_pickup":           summary.get("pickup", [0]),
-        "setup_time_sec":         summary.get("setup", 0),
-        "service_time_sec":       summary.get("service", 0),
-        "total_duration_sec":     summary.get("duration", 0),
-        "total_waiting_time_sec": summary.get("waiting_time", 0),
-    }
-
+        unassigned_stops.append({
+            "stop_index": idx,
+            "store_id":   s.get("store_id", ""),
+            "store_name": s["store_name"],
+            "address":    s.get("pickup_address", ""),
+            "stop_type":  "shipment",
+            "reason":     reason,
+        })
+ 
     return {
-        "summary":       detailed_summary,           # Summary with original + detailed fields
-        "routes":        data["routes"],             # per-vehicle routes with steps
-        "unassigned":    data.get("unassigned", []), # stops VROOM couldn't assign
-        "ordered_stops": ordered_stops,              # flat optimised stop list
+        "summary":          data["summary"],           # raw VROOM summary, no duplication
+        "routes":           data.get("routes", []),    # per-vehicle routes with step detail
+        "unassigned_stops": unassigned_stops,          # stops VROOM couldn't schedule
+        "ordered_stops":    ordered_stops,             # flat optimised stop sequence
     }
-
+ 
 
 @tool
 def distance_matrix(locations: List[dict], profile: str = "driving-car") -> dict:
     """
     Compute duration and distance between locations in sequence.
 
-    Used for before/after POV comparison:
-      • unoptimised: original email stop order
-      • optimised:   VROOM-ordered stops
-
     Endpoint: POST /v2/matrix/{profile}
 
-    Request body sent:
-      {
-        "locations": [[lon, lat], [lon, lat], ...],
-        "metrics":   ["duration", "distance"]
-      }
-
-    Response shape from /v2/matrix/{profile}:
-      {
-        "durations": [[0, 291.6, ...], [839.4, 0, ...], ...],   # seconds NxN
-        "distances": [[0, 1367.6, ...], [894.2, 0, ...], ...],  # metres  NxN
-        "metadata":  { "attribution": "...", "service": "matrix", ... }
-      }
-
-    Sequential legs are extracted as matrix[i][i+1] for i in 0..N-2.
+    Sequential legs are extracted as matrix[i][i+1] for i in 0.....N-2.
 
     Args:
-        locations: List of { longitude, latitude, store_name? } dicts.
+        locations: List of { longitude, latitude, store_name } dicts.
         profile: ORS routing profile (default: 'driving-car').
 
     Returns:
@@ -526,3 +445,13 @@ def distance_matrix(locations: List[dict], profile: str = "driving-car") -> dict
         "total_distance_km":  round(sum(leg["distance_km"]  for leg in legs), 2),
         "total_duration_min": round(sum(leg["duration_min"] for leg in legs), 2),
     }
+
+# print(distance_matrix(
+#     [
+#         {'store_name': 'Store A', 'address': '1600 Amphitheatre Parkway, Mountain View, CA', 'latitude': 37.422288, 'longitude': -122.085652},
+#         {'store_name': 'Store B', 'address': '1 Hacker Way, Menlo Park, CA', 'latitude': 37.4847, 'longitude': -122.1477},
+#         {'store_name': 'Store C', 'address': '2300 Traverwood Dr, Ann Arbor, MI', 'latitude': 42.3037, 'longitude': -83.7108},
+#     ]
+# ))
+# output:
+# {'legs': [{'from': 'Store A', 'to': 'Store B', 'distance_km': 11.37, 'duration_min': 15.75}, {'from': 'Store B', 'to': 'Store C', 'distance_km': 3838.34, 'duration_min': 3244.26}], 'total_distance_km': 3849.71, 'total_duration_min': 3260.01}
