@@ -1,160 +1,168 @@
 {
-  "code": 0,
   "summary": {
-    "cost": 20924,
-    "routes": 2,
-    "unassigned": 1,
-    "delivery": [5],
-    "amount": [5],
-    "pickup": [0],
+    "cost": 11087,
+    "routes": 1,
+    "unassigned": 2,
+    "delivery": [
+      0
+    ],
+    "amount": [
+      0
+    ],
+    "pickup": [
+      0
+    ],
     "setup": 0,
-    "service": 1500,
-    "duration": 20924,
+    "service": 600,
+    "duration": 11087,
     "waiting_time": 0,
-    "priority": 0,
+    "priority": 2,
     "violations": [],
-    "computing_times": { "loading": 117, "solving": 1, "routing": 0 }
+    "computing_times": {
+      "loading": 39,
+      "solving": 1,
+      "routing": 0
+    }
   },
-  "unassigned": [{ "id": 4, "location": [2.41808, 49.22619], "type": "job" }],
   "routes": [
     {
       "vehicle": 1,
-      "cost": 8642,
-      "delivery": [3],
-      "amount": [3],
-      "pickup": [0],
+      "cost": 11087,
+      "delivery": [
+        0
+      ],
+      "amount": [
+        0
+      ],
+      "pickup": [
+        0
+      ],
       "setup": 0,
-      "service": 900,
-      "duration": 8642,
+      "service": 600,
+      "duration": 11087,
       "waiting_time": 0,
-      "priority": 0,
+      "priority": 2,
       "steps": [
         {
           "type": "start",
-          "location": [2.35044, 48.51764],
+          "location": [
+            -122.0,
+            37.0
+          ],
           "setup": 0,
           "service": 0,
           "waiting_time": 0,
-          "load": [3],
+          "load": [
+            0
+          ],
           "arrival": 28800,
           "duration": 0,
           "violations": []
         },
         {
-          "type": "job",
-          "location": [2.28325, 48.5958],
-          "id": 5,
-          "setup": 0,
-          "service": 300,
-          "waiting_time": 0,
-          "job": 5,
-          "load": [2],
-          "arrival": 30352,
-          "duration": 1552,
-          "violations": []
-        },
-        {
-          "type": "job",
-          "location": [1.98465, 48.70329],
+          "type": "pickup",
+          "location": [
+            -122.085652,
+            37.422288
+          ],
           "id": 1,
           "setup": 0,
           "service": 300,
           "waiting_time": 0,
           "job": 1,
-          "load": [1],
-          "arrival": 33427,
-          "duration": 4327,
+          "load": [
+            0
+          ],
+          "arrival": 33650,
+          "duration": 4850,
           "violations": []
         },
         {
-          "type": "job",
-          "location": [2.03655, 48.61128],
+          "type": "delivery",
+          "location": [
+            -122.1477,
+            37.4847
+          ],
           "id": 2,
           "setup": 0,
           "service": 300,
           "waiting_time": 0,
           "job": 2,
-          "load": [0],
-          "arrival": 35013,
-          "duration": 5613,
+          "load": [
+            0
+          ],
+          "arrival": 34895,
+          "duration": 5795,
           "violations": []
         },
         {
           "type": "end",
-          "location": [2.35044, 48.51764],
+          "location": [
+            -122.0,
+            37.0
+          ],
           "setup": 0,
           "service": 0,
           "waiting_time": 0,
-          "load": [0],
-          "arrival": 38342,
-          "duration": 8642,
+          "load": [
+            0
+          ],
+          "arrival": 40487,
+          "duration": 11087,
           "violations": []
         }
       ],
       "violations": []
+    }
+  ],
+  "unassigned_stops": [
+    {
+      "stop_index": 1,
+      "store_id": "B",
+      "store_name": "Store B",
+      "address": "2300 Traverwood Dr, Ann Arbor, MI",
+      "stop_type": "shipment",
+      "reason": "CAPACITY_EXCEEDED"
+    }
+  ],
+  "ordered_stops": [
+    {
+      "job_id": 1,
+      "store_id": "A",
+      "store_name": "Store A",
+      "pickup_address": "1600 Amphitheatre Parkway, Mountain View, CA",
+      "delivery_address": "1 Hacker Way, Menlo Park, CA",
+      "address": "1600 Amphitheatre Parkway, Mountain View, CA",
+      "latitude": 37.422288,
+      "longitude": -122.085652,
+      "stop_type": "pickup",
+      "vehicle_id": 1,
+      "arrival_time_seconds": 33650,
+      "service_duration_seconds": 300,
+      "waiting_time_seconds": 0,
+      "violations": [],
+      "temperature_control": false,
+      "original_sequence": 0,
+      "optimized_sequence": 1
     },
     {
-      "vehicle": 2,
-      "cost": 12282,
-      "delivery": [2],
-      "amount": [2],
-      "pickup": [0],
-      "setup": 0,
-      "service": 600,
-      "duration": 12282,
-      "waiting_time": 0,
-      "priority": 0,
-      "steps": [
-        {
-          "type": "start",
-          "location": [2.35044, 48.51764],
-          "setup": 0,
-          "service": 0,
-          "waiting_time": 0,
-          "load": [2],
-          "arrival": 28800,
-          "duration": 0,
-          "violations": []
-        },
-        {
-          "type": "job",
-          "location": [2.89357, 48.90736],
-          "id": 6,
-          "setup": 0,
-          "service": 300,
-          "waiting_time": 0,
-          "job": 6,
-          "load": [1],
-          "arrival": 33003,
-          "duration": 4203,
-          "violations": []
-        },
-        {
-          "type": "job",
-          "location": [2.39719, 49.07611],
-          "id": 3,
-          "setup": 0,
-          "service": 300,
-          "waiting_time": 0,
-          "job": 3,
-          "load": [0],
-          "arrival": 36114,
-          "duration": 7014,
-          "violations": []
-        },
-        {
-          "type": "end",
-          "location": [2.35044, 48.51764],
-          "setup": 0,
-          "service": 0,
-          "waiting_time": 0,
-          "load": [0],
-          "arrival": 41682,
-          "duration": 12282,
-          "violations": []
-        }
-      ],
-      "violations": []
+      "job_id": 2,
+      "store_id": "A",
+      "store_name": "Store A",
+      "pickup_address": "1600 Amphitheatre Parkway, Mountain View, CA",
+      "delivery_address": "1 Hacker Way, Menlo Park, CA",
+      "address": "1 Hacker Way, Menlo Park, CA",
+      "latitude": 37.4847,
+      "longitude": -122.1477,
+      "stop_type": "delivery",
+      "vehicle_id": 1,
+      "arrival_time_seconds": 34895,
+      "service_duration_seconds": 300,
+      "waiting_time_seconds": 0,
+      "violations": [],
+      "temperature_control": false,
+      "original_sequence": 0,
+      "optimized_sequence": 2
     }
   ]
 }

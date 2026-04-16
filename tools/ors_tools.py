@@ -173,11 +173,6 @@ def optimize_route(
       use_pd_pairs=True  → VROOM `shipments` — pickup ALWAYS precedes its delivery.
       use_pd_pairs=False → VROOM `jobs`       — single-location delivery tasks only.
  
-    Each stop dict must contain:
-      stop_index, store_name, pickup_address,
-      pickup_latitude, pickup_longitude
-      (and for shipments: delivery_address, delivery_latitude, delivery_longitude)
- 
     Optional stop fields:
       expected_pickup_time   ('HH:MM') → time window on the pickup leg
       expected_delivery_time ('HH:MM') → time window on the delivery leg
@@ -251,7 +246,6 @@ def optimize_route(
             shipment: dict = {
                 "pickup":   pickup_leg,
                 "delivery": delivery_leg,
-                "amount":   [1],  # 1 unit per shipment; VROOM tracks load automatically
             }
             if s.get("priority"):
                 shipment["priority"] = int(s["priority"])
@@ -271,7 +265,6 @@ def optimize_route(
             job: dict = {
                 "id":       job_id,
                 "service":  300,
-                "delivery": [1],  # reduces vehicle load by 1 (pre-loaded at depot)
                 "location": [s["pickup_longitude"], s["pickup_latitude"]],
             }
             pu_tw = _time_window(s.get("expected_pickup_time"))
@@ -338,7 +331,7 @@ def optimize_route(
     unassigned_stops: list = []
     seen_indices: set = set()
 
-    # rejection reason
+
     rejection_reasons: dict[int, str] = {}
     for route in data.get("routes", []):
         for step in route.get("steps", []):
@@ -366,19 +359,66 @@ def optimize_route(
 
         unassigned_stops.append({
             "stop_index": idx,
-            "store_id":   s.get("store_id", ""),
+            "store_id":s.get("store_id", ""),
             "store_name": s["store_name"],
-            "address":    s.get("pickup_address", ""),
-            "stop_type":  "shipment",
-            "reason":     reason,
+            "address":s.get("pickup_address", ""),
+            "stop_type": "shipment",
+            "reason": reason,
         })
  
     return {
-        "summary":          data["summary"],           # raw VROOM summary, no duplication
-        "routes":           data.get("routes", []),    # per-vehicle routes with step detail
-        "unassigned_stops": unassigned_stops,          # stops VROOM couldn't schedule
-        "ordered_stops":    ordered_stops,             # flat optimised stop sequence
+        "summary":          data["summary"],           
+        "routes":           data.get("routes", []),
+        "unassigned_stops": unassigned_stops,  
+        "ordered_stops":    ordered_stops,    
     }
+
+# print(optimize_route(
+#     stops=[
+#         {
+#             "stop_index": 0,
+#             "store_id": "A",
+#             "store_name": "Store A",
+#             "pickup_address": "1600 Amphitheatre Parkway, Mountain View, CA",
+#             "pickup_latitude": 37.422288,
+#             "pickup_longitude": -122.085652,
+#             "delivery_address": "1 Hacker Way, Menlo Park, CA",
+#             "delivery_latitude": 37.4847,
+#             "delivery_longitude": -122.1477,
+#             "expected_pickup_time": "09:00",
+#             "expected_delivery_time": "10:00",
+#             "priority": 1,
+#             "temperature_control": False,
+#         },
+#         {
+#             "stop_index": 1,
+#             "store_id": "B",
+#             "store_name": "Store B",
+#             "pickup_address": "2300 Traverwood Dr, Ann Arbor, MI",
+#             "pickup_latitude": 42.3037,
+#             "pickup_longitude": -83.7108,
+#             "delivery_address": "500 S State St, Ann Arbor, MI",
+#             "delivery_latitude": 42.2780,
+#             "delivery_longitude": -83.7382,
+#             "expected_pickup_time": "11:00",
+#             "expected_delivery_time": "12:00",
+#             "priority": 2,
+#             "temperature_control": True,
+#         },
+#     ],
+#     depot_lon=-122.0,
+#     depot_lat=37.0,
+#     max_vehicles=2,
+#     vehicle_capacity=10,
+#     use_pd_pairs=True,
+#     vehicle_time_window=[28800, 64800],
+# ))
+
+# output:
+# {'summary': {'cost': 11087, 'routes': 1, 'unassigned': 2, 'delivery': [0], 'amount': [0], 'pickup': [0], 'setup': 0, 'service': 600, 'duration': 11087, 'waiting_time': 0, 'priority': 2, 'violations': [], 'computing_times': {'loading': 39, 'solving': 1, 'routing': 0}}, 
+# 'routes': [{'vehicle': 1, 'cost': 11087, 'delivery': [0], 'amount': [0], 'pickup': [0], 'setup': 0, 'service': 600, 'duration': 11087, 'waiting_time': 0, 'priority': 2, 'steps': [{'type': 'start', 'location': [-122.0, 37.0], 'setup': 0, 'service': 0, 'waiting_time': 0, 'load': [0], 'arrival': 28800, 'duration': 0, 'violations': []}, {'type': 'pickup', 'location': [-122.085652, 37.422288], 'id': 1, 'setup': 0, 'service': 300, 'waiting_time': 0, 'job': 1, 'load': [0], 'arrival': 33650, 'duration': 4850, 'violations': []}, {'type': 'delivery', 'location': [-122.1477, 37.4847], 'id': 2, 'setup': 0, 'service': 300, 'waiting_time': 0, 'job': 2, 'load': [0], 'arrival': 34895, 'duration': 5795, 'violations': []}, {'type': 'end', 'location': [-122.0, 37.0], 'setup': 0, 'service': 0, 'waiting_time': 0, 'load': [0], 'arrival': 40487, 'duration': 11087, 'violations': []}], 'violations': []}],
+# 'unassigned_stops': [{'stop_index': 1, 'store_id': 'B', 'store_name': 'Store B', 'address': '2300 Traverwood Dr, Ann Arbor, MI', 'stop_type': 'shipment', 'reason': 'CAPACITY_EXCEEDED'}], 
+# 'ordered_stops': [{'job_id': 1, 'store_id': 'A', 'store_name': 'Store A', 'pickup_address': '1600 Amphitheatre Parkway, Mountain View, CA', 'delivery_address': '1 Hacker Way, Menlo Park, CA', 'address': '1600 Amphitheatre Parkway, Mountain View, CA', 'latitude': 37.422288, 'longitude': -122.085652, 'stop_type': 'pickup', 'vehicle_id': 1, 'arrival_time_seconds': 33650, 'service_duration_seconds': 300, 'waiting_time_seconds': 0, 'violations': [], 'temperature_control': False, 'original_sequence': 0, 'optimized_sequence': 1}, {'job_id': 2, 'store_id': 'A', 'store_name': 'Store A', 'pickup_address': '1600 Amphitheatre Parkway, Mountain View, CA', 'delivery_address': '1 Hacker Way, Menlo Park, CA', 'address': '1 Hacker Way, Menlo Park, CA', 'latitude': 37.4847, 'longitude': -122.1477, 'stop_type': 'delivery', 'vehicle_id': 1, 'arrival_time_seconds': 34895, 'service_duration_seconds': 300, 'waiting_time_seconds': 0, 'violations': [], 'temperature_control': False, 'original_sequence': 0, 'optimized_sequence': 2}]}
  
 
 @tool
