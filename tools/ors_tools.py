@@ -3,10 +3,15 @@ tools/ors_tools.py
 OpenRouteService tools — geocoding (Pelias) + VROOM optimisation + distance matrix.
 
 Endpoints used:
-  geocode_address()   →  GET  /geocode/search
-  elevation_point()   →  POST /elevation/point
-  optimize_route()    →  POST /optimization          (VROOM shipments)
-  distance_matrix()   →  POST /v2/matrix/{profile}  (before/after POV)
+  geocode_address()       →  GET  /geocode/search
+  elevation_point()       →  POST /elevation/point
+  optimize_route()        →  POST /optimization          (VROOM shipments)
+  distance_matrix()       →  POST /v2/matrix/{profile}   (fast, point-to-point)
+  calculate_route_distance() → POST /v2/routes           (accurate, full geometry)
+
+NOTE: The /matrix endpoint returns a full NxN matrix of durations/distances.
+      For circular routes (depot → stops → depot), ensure the location list
+      starts AND ends with the depot coordinates.
 """
 from dotenv import load_dotenv
 load_dotenv()
@@ -31,7 +36,7 @@ def _ors_headers() -> dict:
         "Accept":        "application/json, application/geo+json",
     }
 
-DEFAULT_WINDOW_HALF_SEC = 1800
+DEFAULT_WINDOW_HALF_SEC = 3600 
 def _time_str_to_seconds(time_str: str) -> Optional[int]:
     """
     Convert 'HH:MM' string to seconds since midnight.
@@ -79,7 +84,7 @@ def geocode_address(address: str) -> dict:
             "api_key":          ORS_KEY,
             "text":             address,
             "size":             1,
-            "boundary.country": "IND",    # restrict results to India
+            "boundary.country": "IND",  
         },
         timeout=10,
     )
@@ -229,6 +234,7 @@ def optimize_route(
                 "id":       pickup_id,
                 "location": [s["pickup_longitude"], s["pickup_latitude"]],
                 "service":  300,  # 5 min service time
+                "amount":   [1],  # 1 unit per shipment — activates capacity enforcement
             }
             pu_tw = _time_window(s.get("expected_pickup_time"))
             if pu_tw:
@@ -255,7 +261,7 @@ def optimize_route(
         payload = {"shipments": shipments, "vehicles": vehicles}
  
     else:
-        # ── Jobs mode: simple single-location delivery tasks ──────────────────
+
         jobs = []
         for s in stops:
             idx    = s["stop_index"]
@@ -325,21 +331,16 @@ def optimize_route(
             })
             seq += 1
  
-    # ── Map unassigned VROOM items back to stop info
-    # VROOM's unassigned[] gives {id, location, type} — no reason field.
-    # Violation causes (delay / lead_time / capacity) live in route step violations[],
     unassigned_stops: list = []
     seen_indices: set = set()
 
-
-    rejection_reasons: dict[int, str] = {}
+    step_violation_causes: dict[int, str] = {}
     for route in data.get("routes", []):
         for step in route.get("steps", []):
+            step_id = int(step.get("id", step.get("job", 0)))
             for v in step.get("violations", []):
-                job_id = int(v.get("id", 0))
-                if job_id:
-                    violation_type = v.get("violation", "unknown")
-                    rejection_reasons[job_id] = violation_type
+                cause = v.get("cause", "unknown")
+                step_violation_causes[step_id] = cause
 
     for item in data.get("unassigned", []):
         job_id = int(item.get("id", 0))
@@ -352,18 +353,33 @@ def optimize_route(
             continue  # deduplicate: one entry per shipment (pickup+delivery pair)
         seen_indices.add(idx)
 
-        # Get reason from violations map, or infer from item type
-        reason = rejection_reasons.get(job_id)
-        if not reason:
-            reason = "CAPACITY_EXCEEDED" if item.get("type") == "delivery" else "TIME_WINDOW_CONFLICT"
+        reason = step_violation_causes.get(job_id)
+
+        if reason:
+            cause_map = {
+                "delay":       "TIME_WINDOW_CONFLICT",
+                "lead_time":   "TIME_WINDOW_CONFLICT",
+                "capacity":    "CAPACITY_EXCEEDED",
+                "precedence":  "PRECEDENCE_VIOLATION",
+                "max_tasks":   "CAPACITY_EXCEEDED",
+            }
+            reason = cause_map.get(reason, "TIME_WINDOW_CONFLICT")
+        else:
+
+            total_capacity = max_vehicles * vehicle_capacity
+            total_shipments = len(stops)
+            if total_shipments > total_capacity:
+                reason = "CAPACITY_EXCEEDED"
+            else:
+                reason = "TIME_WINDOW_CONFLICT"
 
         unassigned_stops.append({
             "stop_index": idx,
-            "store_id":s.get("store_id", ""),
+            "store_id":   s.get("store_id", ""),
             "store_name": s["store_name"],
-            "address":s.get("pickup_address", ""),
-            "stop_type": "shipment",
-            "reason": reason,
+            "address":    s.get("pickup_address", ""),
+            "stop_type":  "shipment",
+            "reason":     reason,
         })
  
     return {
@@ -428,10 +444,15 @@ def distance_matrix(locations: List[dict], profile: str = "driving-car") -> dict
 
     Endpoint: POST /v2/matrix/{profile}
 
-    Sequential legs are extracted as matrix[i][i+1] for i in 0.....N-2.
+    The matrix endpoint returns a full NxN matrix. We extract sequential legs
+    as matrix[i][i+1] for i in 0..N-2 to get the route following the given order.
+
+    IMPORTANT: The locations list should include DEPOT at start AND end for
+    circular routes (depot -> stops -> depot).
 
     Args:
         locations: List of { longitude, latitude, store_name } dicts.
+                   For round-trip: [DEPOT, stop1, stop2, ..., DEPOT]
         profile: ORS routing profile (default: 'driving-car').
 
     Returns:
@@ -462,6 +483,7 @@ def distance_matrix(locations: List[dict], profile: str = "driving-car") -> dict
         raise ValueError(f"Matrix API returned empty data. Response: {data}")
 
     legs = []
+    # Extract sequential legs: from location i to location i+1
     for i in range(len(locations) - 1):
         dist = distances[i][i + 1] if i < len(distances) and (i + 1) < len(distances[i]) else None
         dur  = durations[i][i + 1] if i < len(durations)  and (i + 1) < len(durations[i])  else None
@@ -495,3 +517,107 @@ def distance_matrix(locations: List[dict], profile: str = "driving-car") -> dict
 # ))
 # output:
 # {'legs': [{'from': 'Store A', 'to': 'Store B', 'distance_km': 11.37, 'duration_min': 15.75}, {'from': 'Store B', 'to': 'Store C', 'distance_km': 3838.34, 'duration_min': 3244.26}], 'total_distance_km': 3849.71, 'total_duration_min': 3260.01}
+
+
+@tool
+def calculate_route_distance(locations: List[dict], profile: str = "driving-hgv") -> dict:
+    """
+    Calculate accurate route distance using ORS /routes endpoint with actual road geometry.
+
+    Unlike the matrix API which uses simplified point-to-point calculations,
+    this function calls the full routing engine which returns precise road distances.
+
+    IMPORTANT: Use this for final distance verification. The matrix API is faster
+    for optimization but may differ from actual driven distance.
+
+    Args:
+        locations: List of { longitude, latitude, store_name } dicts in route order.
+                   For round-trip: [DEPOT, stop1, stop2, ..., DEPOT]
+        profile: ORS routing profile ('driving-car', 'driving-hgv', 'cycling-regular', 'foot-walking')
+
+    Returns:
+        {
+          total_distance_km: float,
+          total_duration_min: float,
+          route_geometry: str,  # Encoded polyline for visualization
+          legs: [ { from, to, distance_km, duration_min } ]
+        }
+    """
+    if len(locations) < 2:
+        return {"total_distance_km": 0.0, "total_duration_min": 0.0, "route_geometry": "", "legs": []}
+
+    # Build coordinates list [lon, lat] format for ORS
+    coordinates = [[loc["longitude"], loc["latitude"]] for loc in locations]
+
+    resp = requests.post(
+        f"{ORS_BASE}/v2/routes",
+        headers=_ors_headers(),
+        json={
+            "coordinates": coordinates,
+            "profile": profile,
+            "format": "geojson",
+            "attributes": ["avgspeed"]
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if "error" in data:
+        raise ValueError(f"ORS /routes error: {data['error']}")
+
+    features = data.get("features", [])
+    if not features:
+        raise ValueError("ORS /routes returned no features")
+
+
+    route = features[0]
+    props = route.get("properties", {})
+    geometry = route.get("geometry", {})
+
+    # Extract distance (meters) and duration (seconds) from route summary
+    total_dist_m = props.get("summary", {}).get("distance", 0)
+    total_dur_s = props.get("summary", {}).get("duration", 0)
+
+    # Extract legs from route segments/instructions
+    legs = []
+    segments = props.get("segments", [{}])
+    if segments and len(segments) > 0:
+        segment = segments[0]
+        steps = segment.get("steps", [])
+
+        for i, step in enumerate(steps):
+            if step.get("type") == 12: 
+                continue
+
+            step_dist = step.get("distance", 0)
+            step_dur = step.get("duration", 0)
+
+            if step_dist > 100:
+                from_name = locations[i].get("store_name", f"Point {i+1}") if i < len(locations) else "Unknown"
+                to_name = locations[i+1].get("store_name", f"Point {i+2}") if i+1 < len(locations) else "Unknown"
+
+                legs.append({
+                    "from": from_name,
+                    "to": to_name,
+                    "distance_km": round(step_dist / 1000, 2),
+                    "duration_min": round(step_dur / 60, 2),
+                })
+
+    if not legs and len(locations) >= 2:
+        avg_leg_dist = total_dist_m / (len(locations) - 1)
+        avg_leg_dur = total_dur_s / (len(locations) - 1)
+        for i in range(len(locations) - 1):
+            legs.append({
+                "from": locations[i].get("store_name", f"Point {i+1}"),
+                "to": locations[i+1].get("store_name", f"Point {i+2}"),
+                "distance_km": round(avg_leg_dist / 1000, 2),
+                "duration_min": round(avg_leg_dur / 60, 2),
+            })
+
+    return {
+        "total_distance_km": round(total_dist_m / 1000, 2),
+        "total_duration_min": round(total_dur_s / 60, 2),
+        "route_geometry": geometry.get("coordinates", []) if geometry else [],
+        "legs": legs,
+    }
